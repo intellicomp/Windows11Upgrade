@@ -42,10 +42,16 @@ Update-Win11 -InPlaceUpgrade -AllowAfter_4AM -SuppressReboot -TargetBuildNumber 
 Run the script via NinjaOne.
 Uncomment the bottom section of the script and deploy it via NinjaOne.
 
+.LINK
+https://github.com/intellicomp/Windows11Upgrade
+
 .NOTES
 The script is designed to be run either manually or via NinjaOne.
 When run manually, the bottom section of the script (where parameters are parsed and the 'Update-Win11' function is called) should be commented out. Just load the script in a shell, press enter, then call the function with the desired parameters (see the first two examples).
 When run via NinjaOne, the bottom section is uncommented to allow the script to parse environment variables (selected using the NinjaOne interface) and execute automatically.
+
+You can also run the code below to download and load the script into memory. Then you can call the function by running Update-Win11, along with the desired parameters.
+"wget -uri 'https://raw.githubusercontent.com/IntelliScripts/Get-AVInfo/master/Get-AVInfo.ps1' -UseBasicParsing | iex"
 
 A post reboot check is performed to verify the success of the upgrade by checking the current Windows build number. The script saves a second PowerShell script to the 'C:\Win11' directory, and that script is added to the RunOnce Registry key, to run after the next reboot. 
 The script also checks if Bitlocker is re-enabled on the C: drive and re-enables it if necessary.
