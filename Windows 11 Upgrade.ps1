@@ -1,3 +1,6 @@
+# Enable strict mode
+Set-StrictMode -Version Latest
+    
 function Update-Win11 {
     <#
 .SYNOPSIS
@@ -13,7 +16,7 @@ Specifies whether to force an in-place upgrade. Set this to 'true' to enable.
 .PARAMETER AllowAfter_4AM
 Allows the script to run after 4 AM. If not set, the script will exit if the current time is after 4 AM.
 
-.PARAMETER SuppressReboot
+#.PARAMETER SuppressReboot
 Prevents the system from rebooting automatically after the upgrade. If not set, the system will reboot automatically.
 NOTE: This controls the reboot behavior initiated manually by the script post-upgrade; the upgrade itself is always run with the /noreboot switch.
 
@@ -26,6 +29,9 @@ Specifies the target build number for the upgrade. Defaults to '26100' (Windows 
 .PARAMETER ShowProgress
 Displays the download progress in the console. 
 This is not recommended for use with NinjaOne as it will clutter the Ninja Activity logs. Use when running the script interactively on a machine.
+
+.PARAMETER EnablementPackage
+Specifies to use an enablement package for the upgrade. (This is for future use as this is NOT available for 24H2.)
 
 .PARAMETER LogFilePath
 Specifies the path to the log file where the script will write its logs. Defaults to 'C:\Win11\Win11Upgrade.log'.
@@ -56,7 +62,7 @@ You can also run the code below to download and load the script into memory. The
 A post reboot check is performed to verify the success of the upgrade by checking the current Windows build number. The script saves a second PowerShell script to the 'C:\Win11' directory, and that script is added to the RunOnce Registry key, to run after the next reboot. 
 The script also checks if Bitlocker is re-enabled on the C: drive and re-enables it if necessary.
 The script will delete itself after running. The value of the RunOnce Registry key is deleted by default before the command is run. More information on the RunOnce Registry key:
-https://learn.microsoft.com/en-us/windows/win32/sysinfo/registry-keys-for-windows-setup
+https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys
 
 LOGGING
 Logs will be written to the specified log file (the default is: "C:\Win11\Win11Upgrade.log"). If run manually, logs will also output to the console.
@@ -72,13 +78,13 @@ Get-Content 'C:\$WINDOWS.~BT\Sources\Panther\setupact.log' -Tail 1 -Wait
 (Once the upgrade is complete, the setupact.log file will also be copied to the log file location specified in the script ("C:\Win11\Win11Upgrade.log" by default). 
 
 ====================================================================================================
-AUTHOR: THH
 DATE CREATED: April 2025
-LAST UPDATED: 5/9/2025
-VERSION: 1.0
-PURPOSE: Automate the upgrade process to a specified version of Windows 11.
+LAST UPDATED: 7/25/2025
+RELEASE VERSION: 1.0
+PURPOSE: Script the Windows upgrade process to a specified version of Windows 11.
 NOTES: This script is designed for use in both manual and automated environments (e.g., NinjaOne).
 Comments and suggestions welcome!
+-THH
 ====================================================================================================
 #>
     [CmdletBinding()]
@@ -113,6 +119,11 @@ Comments and suggestions welcome!
         [Parameter(Mandatory = $false)]
         [switch]$ShowProgress,
 
+        # Parameter to use an enablement package for the upgrade (i.e., a cumulative update that turns on existing-but-hidden features)
+        # < NOT available for 24H2 >
+        [Parameter(Mandatory = $false)]
+        [switch]$EnablementPackage,
+
         # Parameter to specify the path for the log file, default is C:\Win11\Win11Upgrade.log
         [Parameter(Mandatory = $false)]
         [Validatescript({
@@ -131,7 +142,7 @@ Comments and suggestions welcome!
         #region functions
         function Write-Log {
             param(
-                [Parameter(Mandatory = $true)]
+                [Parameter(Mandatory = $false)] # set to false to allow for the $BlankLine switch
                 [string]$Message,
         
                 [Parameter(Mandatory = $false)]
@@ -139,9 +150,23 @@ Comments and suggestions welcome!
         
                 [Parameter(Mandatory = $false)]
                 [ValidateSet("Info", "Warning", "Error")]
-                [string]$Severity = "Info"
+                [string]$Severity = "Info",
+
+                [Parameter(Mandatory = $false)]
+                [switch]$BlankLine
             )
 
+            if ($BlankLine) {
+                Write-Host ""
+                try {
+                    Add-Content -Path $LogPath -Value ""
+                }
+                catch {
+                    Write-Host "Failed to write blank line to log file." -ForegroundColor Red
+                }
+                return
+            }
+    
             $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             $LogEntry = "[$Timestamp] [$Severity] $Message"
         
@@ -295,7 +320,10 @@ Comments and suggestions welcome!
                 
                 # Clear any existing BITS jobs related to the same destination or source URL
                 $existingBitsJobs = Get-BitsTransfer -AllUsers | Where-Object {
-                    $_.FileList.LocalName -eq $Destination -or $_.FileList.RemoteName -eq $SourceUrl
+                    $_.FileList -and $_.FileList.Count -gt 0 -and (
+                        $_.FileList[0].LocalName -eq $Destination -or
+                        $_.FileList[0].RemoteName -eq $SourceUrl
+                    )
                 }
         
                 if ($existingBitsJobs) {
@@ -325,7 +353,12 @@ Comments and suggestions welcome!
 
                         if ($bitsJob.JobState -like "*Error*") {
                             Write-Log -Severity Warning -Message "The BITS job encountered an error immediately after starting. State: $($bitsJob.JobState)"
-                            Write-Log -Message "Removing the BITS job, waiting 5 seconds and retrying."
+                            if ($bitsAttempts -eq 3) {
+                                Write-Log -Message "Removing the BITS job."
+                            }
+                            else {
+                                Write-Log -Message "Removing the BITS job, waiting 5 seconds and retrying."
+                            }
                             Remove-BitsTransfer -BitsJob $bitsJob -Confirm:$false
                             Start-Sleep -Seconds 5
                             # Continue with the next download attempt
@@ -355,7 +388,7 @@ Comments and suggestions welcome!
                             # If the job enters an error state, handle it immediately
                             if ($bitsJob.JobState -eq 'Error') {
                                 Write-Log -Severity Warning -Message "BITS job encountered an error while waiting for the 'Transferring' state. State: $($bitsJob.JobState)"
-                                $errorDetails = $bitsJob | Get-BitsTransfer -Error
+                                $errorDetails = ($bitsJob | Get-BitsTransfer).ErrorDescription
                                 Write-Log -Severity Warning -Message "Error details: $errorDetails"
                                 Remove-BitsTransfer -BitsJob $bitsJob -Confirm:$false
                                 throw "BITS job failed to start transferring."
@@ -472,16 +505,24 @@ Comments and suggestions welcome!
                             # Restore the original progress preference
                             $ProgressPreference = $OriginalProgressPreference
                         }
+                    } # While loop for Invoke-WebRequest attempts
+
+                    # If both BITS and Invoke-WebRequest fail, log the error and exit
+                    if (-not $webRequestSuccess) {
+                        Write-Log -Severity Error -Message "File download failed after all attempts using BITS and Invoke-WebRequest. Exiting script."
+                        exit 1
                     }
                 } # attempt to use Invoke-WebRequest
         
+
                 # Verify the hash if provided
                 if ($ExpectedHash) {
                     Write-Log "Verifying file hash."
                     $ActualHash = (Get-FileHash -Path $Destination -Algorithm SHA256).Hash
                     if ($ActualHash -ne $ExpectedHash) {
-                        Write-Log "Error: Hash verification failed for $($Destination). Expected: $ExpectedHash, Actual: $ActualHash."
-                        return
+                        Write-Log "Error: Hash verification failed for $($Destination). Expected hash: $ExpectedHash, Actual hash: $ActualHash."
+                        Write-Log "Exiting script due to hash mismatch."
+                        exit 1
                     }
                     else {
                         Write-Log "Hash verification succeeded."
@@ -496,7 +537,60 @@ Comments and suggestions welcome!
                 # Write-Log "File download process completed."
             }
         } # function Download-File
-        
+
+        function 7z-Install {
+            <#
+            .SYNOPSIS
+            Checks for 7-Zip installation and installs it if not found.
+    
+            .DESCRIPTION
+            This function checks if 7-Zip is installed on the system. If not, it downloads and installs 7-Zip silently.
+            #>
+
+            # Check if 7-Zip is already installed
+            $possiblePaths = @(
+                "$env:ProgramFiles\7-Zip\7z.exe",
+                "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+            )
+            $sevenZipExe = $possiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+            if ($sevenZipExe) {
+                Write-Log "7-Zip is already installed at $sevenZipExe"
+                return $sevenZipExe
+            }
+            else {
+                Write-Log "7-Zip not found, proceeding with download and installation."
+                # Download and install 7-Zip
+                $installerUrl = "https://www.7-zip.org/a/7z2500-x64.exe"
+                $downloadPath = "$env:TEMP\7z_installer.exe"
+                try {
+                    Invoke-WebRequest -Uri $installerUrl -OutFile $downloadPath -ErrorAction Stop
+                }
+                catch {
+                    Write-Log -Severity Error -Message "Failed to download 7-Zip installer. Error: $_"
+                    Write-Log -Severity Info "Files have been left in place. Exiting script."
+                    exit 1
+                }
+                Write-Log "Download complete. Installing 7-Zip..."
+                Start-Process -FilePath $downloadPath -ArgumentList "/S" -Wait
+                
+                # Check again after install
+                $sevenZipExe = $possiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+                if ($sevenZipExe) {
+                    Write-Log "Installation complete. 7z.exe is at: $sevenZipExe."
+                    Write-Log "Removing the install file..."
+                    Remove-Item -Path $downloadPath -Force
+                    return $sevenZipExe
+                }
+                else {
+                    Write-Log "7z.exe not found after installation."
+                    Write-Log -Severity Error "The 7-Zip install failed. Files have been left in place. Exiting script."
+                    exit 1
+                }
+            }
+        } # function 7z-Install
+
         function Extract-ISO {
             [CmdletBinding()]
             param (
@@ -514,12 +608,20 @@ Comments and suggestions welcome!
             )
 
             process {
-                Write-Log "Extracting the contents of the ISO to $($DestinationFolder)..."
+                # Write-Log "Setting up the pre-requisites for extracting the ISO file."
 
+                <#
                 # Define paths for 7z.exe and 7z.dll
                 $7zipFolder = "$Win11Directory\7zip"
                 if (-not (Test-Path -Path $7zipFolder)) {
-                    New-Item -ItemType Directory -Path $7zipFolder | Out-Null
+                    try {
+                        New-Item -ItemType Directory -Path $7zipFolder | Out-Null
+                        Write-Log "Created the $($7zipFolder) folder."
+                    }
+                    catch {
+                        Write-Log -Severity Warning "Failed to create 7zip folder at $($7zipFolder)."
+                        return
+                    }
                 }
                 $7zipExePath = "$7zipFolder\7z.exe"
                 $7zipDllPath = "$7zipFolder\7z.dll"
@@ -528,10 +630,21 @@ Comments and suggestions welcome!
                 $expected7zipExeHash = "034ECA579F68B44F8F41294D8C9DAC96F032C57DEE0877095DA47913060DFF84"
                 $expected7zipDllHash = "6CD22F513CE36B4727BB6C353C58182C7CC8A14CBE3EEFDCA85C2A25906A0077"
 
-                # Download 7z.exe and 7z.dll
-                Write-Log "Downloading 7z..."
-                Download-File -SourceUrl "https://labtech.intellicomp.net/Labtech/Transfer/Scripts/DataComm/Utilities/7z.exe" -Destination $7zipExePath -ExpectedHash $expected7zipExeHash
-                Download-File -SourceUrl "https://labtech.intellicomp.net/Labtech/Transfer/Scripts/DataComm/Utilities/7z.dll" -Destination $7zipDllPath -ExpectedHash $expected7zipDllHash
+                # Download 7z.exe and 7z.dll if not already present
+                if (-not (Test-Path -Path $7zipExePath)) {
+                    Write-Log "Downloading 7z.exe..."
+                    Download-File -SourceUrl "https://ltshare.nyc3.digitaloceanspaces.com/PortableTools/7z.exe" -Destination $7zipExePath -ExpectedHash $expected7zipExeHash
+                }
+                else {
+                    Write-Log "7z.exe already exists. Skipping download."
+                }
+                if (-not (Test-Path -Path $7zipDllPath)) {
+                    Write-Log "Downloading 7z.dll..."
+                    Download-File -SourceUrl "https://ltshare.nyc3.digitaloceanspaces.com/PortableTools/7z.dll" -Destination $7zipDllPath -ExpectedHash $expected7zipDllHash
+                }
+                else {
+                    Write-Log "7z.dll already exists. Skipping download."
+                }
 
                 # Verify that 7z.exe and 7z.dll were downloaded successfully
                 if (-not (Test-Path -Path $7zipExePath) -or -not (Test-Path -Path $7zipDllPath)) {
@@ -549,13 +662,21 @@ Comments and suggestions welcome!
                     Write-Log -Severity Warning "Failed to extract the ISO file to $($DestinationFolder) using 7z. Exiting the function."
                     return
                 }
-                Write-Log "ISO file extracted successfully to $($DestinationFolder)."
+                Write-Log "Successfully extracted the ISO to $($DestinationFolder)."
                 #>
 
+                #>
                 # Define log file paths for standard output and error
                 # Redirecting unneeded output from 7z so as not to clutter the console
-                $stdoutLog = "$7zipFolder\7z_stdout.log"
-                $stderrLog = "$7zipFolder\7z_stderr.log"
+                # $stdoutLog = "$7zipFolder\7z_stdout.log"
+                # $stderrLog = "$7zipFolder\7z_stderr.log"
+
+                
+                # Call the 7z-Install function to ensure 7-Zip is installed and return the path to 7z.exe
+                $7zipExePath = 7z-Install
+
+                $stdoutLog = "C:\Windows\Temp\7z_stdout.log"
+                $stderrLog = "C:\Windows\Temp\7z_stderr.log"
         
                 $Parameters = @{
                     FilePath               = $7zipExePath
@@ -567,10 +688,11 @@ Comments and suggestions welcome!
                 }
 
                 try {
+                    Write-Log "Starting the extraction process using 7z. Please wait..."
                     Start-Process @Parameters
 
                     # verify that the extraction was successful using the folder size
-                    $extractedFolderSize = (Get-ChildItem -Path $DestinationFolder -Recurse | Measure-Object -Property Length -Sum).Sum
+                    $extractedFolderSize = Get-ChildItem -Path $DestinationFolder -Recurse | Measure-Object -Property Length -Sum | Select-Object -ExpandProperty Sum
                     if ($extractedFolderSize -ne $expectedExtractedFolderSize) {
                         Write-Log -Severity Warning "Failed to extract the ISO file using 7z. Exiting the function."
                         Write-Log "Leaving the ISO file in place for the next run. Exiting the script."
@@ -592,10 +714,12 @@ Comments and suggestions welcome!
                     Write-Log "Deleted the ISO file at $($SourceFile)."
                 }
 
+                <#
                 if (Test-Path -Path $7zipFolder) {
                     Remove-Item -Path $7zipFolder -Recurse -Force -ErrorAction SilentlyContinue
                     Write-Log "Deleted the 7zip folder at $($7zipFolder)."
                 }
+                #>
             } # process
         } # function Extract-ISO
         
@@ -762,7 +886,6 @@ Comments and suggestions welcome!
             }
         } # function Initialize-RebootProcedure
         #>
-
         function Initialize-RebootProcedure {
             # Define the path where the script will be saved
             $scriptPath = "C:\Win11\WindowsUpgradePostRebootCheck.ps1"
@@ -771,7 +894,7 @@ Comments and suggestions welcome!
             $scriptContent = @'
             param (
                 [string]$LogFilePath = "C:\Win11\Win11Upgrade.log",
-                [int]$TargetBuildNumber = $targetBuildNumber
+                [int]$TargetBuildNumber = __TARGET_BUILD__ # placeholder for $TargetBuildNumber
             )
 
             function Write-Log {
@@ -809,7 +932,14 @@ Comments and suggestions welcome!
                 Write-Log "BitLocker is re-enabled for the C: drive."
             }
             else {
-                Write-Log -Severity Warning "BitLocker was NOT re-enabled for the C: drive."
+                try {
+                    # Attempt to re-enable BitLocker
+                    Resume-BitLocker -MountPoint "C:" -ErrorAction Stop
+                    Write-Log "BitLocker was re-enabled for the C: drive."
+                }
+                catch {
+                    Write-Log -Severity Warning "Failed to re-enable BitLocker for the C: drive. Error: $_"
+                }
             }
 
             # Perform cleanup
@@ -825,11 +955,15 @@ Comments and suggestions welcome!
             }
 '@
 
+            # Replace the __TARGET_BUILD__ placeholder with the actual target build number. 
+            # This is needed since we're using a single-quoted here-string (so the other variables are not expanded when written to the ps1 file) but we want this specific variable to be expanded.
+            $scriptContent = $scriptContent.Replace('__TARGET_BUILD__', $TargetBuildNumber)
+
             # Write the script content to the file
             $scriptContent | Set-Content -Path $scriptPath -Force
 
-            Write-Host "Script saved to $scriptPath"
-
+            Write-Log "Post-reboot script saved to $scriptPath"
+            <#
             # Get the current ACL for the file
             $acl = Get-Acl -Path $scriptPath
 
@@ -842,25 +976,51 @@ Comments and suggestions welcome!
                 "Allow"           # Allow rule
             )
 
+            # Create a new access rule for the SYSTEM account
+            # This is needed since the RunOnce key is run as SYSTEM
+            $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                "SYSTEM", # User or group
+                "FullControl", # Permissions
+                "None", # Applies to this object only
+                "None", # No special flags
+                "Allow"           # Allow rule
+            )
+
             # Remove inheritance and clear existing permissions
             $acl.SetAccessRuleProtection($true, $false)
 
-            # Add the new rule for Administrators
+            # Add the new rules for Administrators and SYSTEM
             $acl.SetAccessRule($adminRule)
+            $acl.SetAccessRule($systemRule)
 
             # Apply the updated ACL to the file
             Set-Acl -Path $scriptPath -AclObject $acl
 
             Write-Host "Permissions for the script file have been locked down to administrators only."
+#>
 
-            # Define the command to run the script
+            <#
+            # Secure the script file: SYSTEM and Administrators only
+            $acl = Get-Acl $scriptPath
+            $acl.SetAccessRuleProtection($true, $false)
+            $acl.Access | Where-Object { $_.IdentityReference -notmatch '^(BUILTIN\\Administrators | NT AUTHORITY\\SYSTEM)$' } | ForEach-Object {
+                $acl.RemoveAccessRule($_)
+            }
+            $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "Allow")
+            $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "Allow")
+            $acl.AddAccessRule($adminRule)
+            $acl.AddAccessRule($systemRule)
+            Set-Acl $ScriptPath $acl
+            #>
+
+            # Define the command that will run the script
             $command = "PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
 
             # Add to the RunOnce key for all users
             # https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys
             Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" -Name "WindowsUpgradePostRebootCheck" -Value $command
 
-            Write-Host "Post-reboot script added to RunOnce registry key."
+            Write-Log "Post-reboot script added to the 'RunOnce' Registry key."
         } # function Initialize-RebootProcedure
 
         function Suspend-BitLockerUntilReboot {
@@ -906,6 +1066,7 @@ Comments and suggestions welcome!
             }
         }
         else {
+            Write-Log -BlankLine
             Write-Log "The C:\Win11 directory already exists."
         }
 
@@ -915,6 +1076,7 @@ Comments and suggestions welcome!
         Write-Log "The script log file can be found at `"C:\Win11\Win11Upgrade.log`"."
         # Write-Log "The setupact log file can be found at `"$Win11Directory\Windows11SetupLogs\Panther\setupact.log.`"."
 
+        <# No longer in use since adding in the ApplyAutomationControls
         # File to track number of times this script has been run on this machine
         $ScriptRunCountFile = "C:\Win11\Win11Upgrade_RunCount.txt"
         if (Test-Path -Path $ScriptRunCountFile) {
@@ -926,7 +1088,28 @@ Comments and suggestions welcome!
         Write-Log "This script has been run on this machine $($ScriptRunCount) time(s)."
         $ScriptRunCount++
         Set-Content -Path $ScriptRunCountFile -Value $ScriptRunCount -ErrorAction SilentlyContinue
+        #>
 
+        # When running on a schedule via NinjaOne, apply automation controls, namely take into account the value of the upgrade state CF and increment the attempt count CF
+        If ($Env:ApplyAutomationControls -eq "true") {
+            # Exit if the state custom field is not set to "Ready to run upgrade script". 
+            $upgradeStateCustomField = Ninja-Property-Get windowsMajorVersionUpgradeState
+            if ($upgradeStateCustomField -ne "Ready to run upgrade script") {
+                if ([string]::IsNullOrWhiteSpace($upgradeStateCustomField)) {
+                    Write-Log "The windowsMajorVersionUpgradeState custom field is empty. Exiting script."
+                }
+                else {
+                    Write-Log "The windowsMajorVersionUpgradeState custom field value is $($upgradeStateCustomField). Exiting script."
+                }
+                exit 0
+            }
+        }
+
+        # Increment the attempt count custom field.
+        $attemptCount = [int](ninja-property-get windowsMajorVersionUpgradeAttemptCount)
+        Write-Log "This script has been run on this machine $($attemptCount) time(s). Incrementing the attempt count by 1."
+        $attemptCount ++
+        ninja-property-set windowsMajorVersionUpgradeAttemptCount $attemptCount
 
         # Check if the script is running with administrative privileges
         if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -952,56 +1135,37 @@ Comments and suggestions welcome!
         $WindowsVersionInfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
         $CurrentBuildNumber = [int]$WindowsVersionInfo.CurrentBuildNumber # [Environment]::OSVersion.Version.Build
         
-        if ($WindowsVersionInfo.LCUVer) {
-            $WindowsLCU = [int]($WindowsVersionInfo.LCUVer.split(".")[3]) # the latest cumulative update version
+        if ($WindowsVersionInfo.PSObject.Properties['LCUVer']) {
+            # $WindowsLCU = [int]($WindowsVersionInfo.LCUVer.split(".")[3]) # the latest cumulative update version
             $WindowsBuildAndCU = $WindowsVersionInfo.LCUVer.split(".")[-2..-1] -join "." # the latest cumulative update version
         }
-        else {
-            $WindowsLCU = [int]($WindowsVersionInfo.WinREVersion.split(".")[3]) # the latest cumulative update version
+        elseif ($WindowsVersionInfo.PSObject.Properties['WinREVersion']) {
+            # $WindowsLCU = [int]($WindowsVersionInfo.WinREVersion.split(".")[3]) # the latest cumulative update version
             $WindowsBuildAndCU = $WindowsVersionInfo.WinREVersion.split(".")[-2..-1] -join "." # the latest cumulative update version
         }
-        
+        else {
+            $WindowsBuildAndCU = $WindowsVersionInfo.CurrentBuildNumber
+        }
         
         $WindowsEdition = $WindowsVersionInfo.ProductName
-
-        <#
-        # Minimum version for using the Windows 11 enablement package to upgrade from version 22H2 to version 23H2
-        # https://support.microsoft.com/en-us/topic/kb5027397-feature-update-to-windows-11-version-23h2-by-using-an-enablement-package-b9e76726-3c94-40de-b40b-99decba3db9d
-        $Win_Enablement_Minimum_OSBuild = 22621 # Windows 11 22H2 / Release date September 20, 2022
-        # Check for the following prerequisite installed before updating to Win11 version 23H2 using the enablment package: 22621.2506 or a later cumulative update
-        $Win_Enablement_Minimum_CumulativeUpdate = 22621.2506
-        #>
 
         # Check if the current build is already up to date
         if ($CurrentBuildNumber -ge $TargetBuildNumber) {
             Write-Log "Windows is already up to date. Current build number: $($WindowsBuildAndCU), Target build number: $($TargetBuildNumber). Exiting the script."
             return
         }
-        
 
-        <#
-        Write-Log "Checking compatibility with Windows 11 version $($TargetBuildNumber)..."
-        # Using the hash table format for future extensibility when adding newer versions of Windows 11
-        $CompatibilityChecks = @{
-            26100 = @{
-                MinimumBuild = 22621
-                MinimumLCU   = 3672
-                Message      = "The current build number ($($CurrentBuildNumber)) is not compatible with Windows 11 version 24H2. Devices must be running at least version 22H2 with the May 2024 non-security preview update (build 22621.3672) or later."
+        # Check if the en-GB language is installed
+        # Set $enGB to $false initially, otherwise, if the registry key does not exist, $enGB will be $null and neither part of the logic in the if statement of the 26100 section in the switch statement, will run
+        $enGB = $false
+        try {
+            if ((Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\Language').InstallLanguage -eq '0809') {
+                $enGB = $true
             }
         }
-
-        # Check if the current build number is less than the minimum required for the target version
-        if ($CompatibilityChecks.ContainsKey($TargetBuildNumber)) {
-            $Check = $CompatibilityChecks[$TargetBuildNumber]
-            if ( ($CurrentBuildNumber -lt $Check.MinimumBuild) -or ($WindowsLCU -lt $Check.MinimumLCU) ) {
-                Write-Log -Severity Warning $Check.Message
-                return
-            }
-            else {
-                Write-Log "The current build is compatible with Windows 11 version $($TargetBuildNumber)."
-            }
-        } 
-        #>
+        catch {
+            Write-Log -Severity Warning "Failed to check for en-GB language. Error: $_. Exception.Message"
+        }
 
         # switch statement to set the possible download paths and expected file sizes and hashes based on the target build number
         switch ($TargetBuildNumber) {
@@ -1022,17 +1186,30 @@ Comments and suggestions welcome!
                 $Download_Path_ENT_64 = "https://ltshare.nyc3.digitaloceanspaces.com/Win11_24H2/SW_DVD9_Win_Pro_11_24H2_64BIT_English_Pro_Ent_EDU_N_MLF_X23-69812.ISO"
                 $ISO_Length_ENT_64 = 5722114048
                 $Folder_Length_ENT_64 = 5716480766
-                $ExpectedFileHash_ENT_64 = "D0DCA325314322518AE967D58C3061BCAE57EE9743A8A1CF374AAD8637E5E8AC"
+                $ExpectedFileHash_ENT_64 = "D0DCA325314322518AE967D58C3061BCAE57EE9743A8A1CF374AAD8637E5E8AC"                
                 # Home/Pro/Education 64-bit
-                $Download_Path_Home_Pro_EDU_64 = "https://ltshare.nyc3.digitaloceanspaces.com/Win11_24H2/Win11_24H2_English_x64.iso"
-                $ISO_Length_Home_Pro_EDU_64 = 5819484160
-                $Folder_Length_Home_Pro_EDU_64 = 5813856759
-                $ExpectedFileHash_Home_Pro_EDU_64 = "B56B911BF18A2CEAEB3904D87E7C770BDF92D3099599D61AC2497B91BF190B11"
+                if ($enGB) {
+                    # en-GB
+                    $Download_Path_Home_Pro_EDU_64 = "https://ltshare.nyc3.digitaloceanspaces.com/Win11_24H2/Win11_24H2_EnglishInternational_x64.iso"
+                    $ISO_Length_Home_Pro_EDU_64 = 5832091648
+                    $Folder_Length_Home_Pro_EDU_64 = 5826157508
+                    $ExpectedFileHash_Home_Pro_EDU_64 = "D5A4C97C3E835C43B1B9A31933327C001766CE314608BA912F2FFFC876044309"
+                }
+                else {
+                    # en-US
+                    $Download_Path_Home_Pro_EDU_64 = "https://ltshare.nyc3.digitaloceanspaces.com/Win11_24H2/Win11_24H2_English_x64.iso"
+                    $ISO_Length_Home_Pro_EDU_64 = 5819484160
+                    $Folder_Length_Home_Pro_EDU_64 = 5813856759
+                    $ExpectedFileHash_Home_Pro_EDU_64 = "B56B911BF18A2CEAEB3904D87E7C770BDF92D3099599D61AC2497B91BF190B11"
+                }
             } # 24H2
         } # switch
-         
+        Write-Debug "After the switch statement, the Version is $($Version), the Download_Path_ENT_64 is $($Download_Path_ENT_64), the Download_Path_Home_Pro_EDU_64 is $($Download_Path_Home_Pro_EDU_64))."
 
         Write-Log "Windows Edition detected: $($WindowsEdition)."
+        if ($enGB) {
+            Write-Log "The en-GB language is installed on this machine. Using the English Innternational ISO."
+        }
 
         # Set the download path and expected file size from the target build number, based on the Windows edition
         if ($WindowsEdition -match "Home|Pro|Education") {
@@ -1047,6 +1224,7 @@ Comments and suggestions welcome!
             $ExpectedISOSize = $ISO_Length_ENT_64
             $ExpectedFileHash = $ExpectedFileHash_ENT_64
         } # else Enterprise
+        Write-Debug "After setting the download path, the Download_Path is $($Download_Path)."
 
         # Check if any of the required variables are empty
         if (-not $Download_Path -or -not $ExpectedFolderSize -or -not $ExpectedISOSize -or -not $ExpectedFileHash) {
@@ -1059,21 +1237,21 @@ Comments and suggestions welcome!
         # Installer paths
         $Installer_ISO_Path = "$Win11Directory\Win11.iso"
         $ISOFolderPath = "$Win11Directory\SetupFolder"
-        $Installer_exe = "Setup.exe"    
+        $Installer_exe = "Setup.exe"  
         
         #endregion initializing variables
         
         
-        Write-Log "Checking if the ISO file and/or the extracted folder are present..."
+        Write-Log "Checking if the ISO file and/or the setup folder are present..."
 
         # Initialize flag for ISO presence and validity
         $ISOPresentAndValid = $false
         # Initialize flag for the ISO extracted folder presence and validity
         $ISOFolderPresentAndValid = $false
 
-        if ((Test-Path $ISOFolderPath) -and (Get-ChildItem -Path $ISOFolderPath -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum -eq $ExpectedFolderSize) {
+        if ((Test-Path $ISOFolderPath) -and (Get-ChildItem -Path $ISOFolderPath -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum | Select-Object -ExpandProperty Sum) -eq $ExpectedFolderSize) {
             $ISOFolderPresentAndValid = $true  
-            Write-Log "The ISO extracted folder is present and matches the expected size." 
+            Write-Log "The ISO setup folder is present and matches the expected size." 
         }
 
         if ($ISOFolderPresentAndValid -eq $false) {
@@ -1091,14 +1269,12 @@ Comments and suggestions welcome!
                     Write-Log "The invalid ISO file has been deleted."
                 }
             } # if ISO file is present
-            else {
-                Write-Log "The ISO file and extracted folder are not present."
-            } # if ISO file is not present
     
             if ($ISOPresentAndValid -eq $false) {            
                 # Check for sufficient free space on the system drive for the download
                 Write-Log "Checking for sufficient free space on the system drive for the download..."
-                $FreeSpaceGB = [math]::Round((Get-PSDrive -Name C).Free / 1GB, 2)
+                # $FreeSpaceGB = [math]::Round((Get-PSDrive -Name C).Free / 1GB, 2)
+                $FreeSpaceGB = [math]::Round((Get-Volume -DriveLetter C).SizeRemaining / 1GB, 2)
                 if ($FreeSpaceGB -lt 15) {
                     Write-Log -Severity Warning "Insufficient free space on the system drive for the download. At least 15 GB is required. Exiting the script."
                     return
@@ -1121,7 +1297,8 @@ Comments and suggestions welcome!
         
 
         Write-Log "Checking that there are at least 10 GB free on the system drive..."
-        $freeSpaceGB = [math]::Round((Get-PSDrive -Name C).Free / 1GB, 2)
+        # $freeSpaceGB = [math]::Round((Get-PSDrive -Name C).Free / 1GB, 2)
+        $FreeSpaceGB = [math]::Round((Get-Volume -DriveLetter C).SizeRemaining / 1GB, 2)
         if ($freeSpaceGB -lt 10) {
             Write-Log -Severity Warning "There isn't enough free space on the system drive. At least 10 GB is required. Leaving the ISO file in place for the next attempt and exiting the script."
             return
@@ -1133,9 +1310,10 @@ Comments and suggestions welcome!
         
         #region ISO Extraction
         if ($ISOFolderPresentAndValid -eq $false) {
-            # Extract the contents of the ISO file to a temporary folder. Create the folder if it doesn't exist.        
+            # Extract the contents of the ISO file to a temporary folder. Create the folder if it doesn't exist.  
             if (Test-Path -Path $ISOFolderPath) {
-                if ((Get-ChildItem -Path $ISOFolderPath -Recurse | Measure-Object -Property Length -Sum).Sum -eq $ExpectedFolderSize) {
+                # cannot use '().Sum' in the next line since Strict Mode will throw an error if the setup folder is empty and we call a property on $null
+                if ((Get-ChildItem -Path $ISOFolderPath -Recurse | Measure-Object -Property Length -Sum | Select-Object -ExpandProperty Sum) -eq $ExpectedFolderSize) {
                     Write-Log "The ISO file has already been extracted to $($ISOFolderPath) and matches the expected folder size."
                 }
                 else {
@@ -1179,7 +1357,7 @@ Comments and suggestions welcome!
 
         # Construct arguments for the setup.exe command using a hash table
         # https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/windows-setup-command-line-options?view=windows-11
-        Write-Log "Constructing arguments for setup.exe..."
+        Write-Log "Constructing the arguments for setup.exe."
         $upgradeArgs = [ordered]@{
             "/auto"          = "upgrade"
             "/quiet"         = $null
@@ -1190,10 +1368,15 @@ Comments and suggestions welcome!
             "/noreboot"      = $null
             "/copylogs"      = "`"$Win11Directory\Windows11SetupLogs`""
         }
+        
         # Conditionally add the /product argument for non-Win11-compatible machines
         if ($UnsupportedHardware) {
             $upgradeArgs["/product"] = "server"
         }
+        # Conditionally add the /bitlocker argument for BitLocker suspension
+        #if (-not $SuppressReboot) {
+        #    $upgradeArgs["/bitlocker"] = "AlwaysSuspend"
+        #}
         
 
         # Convert the hash table to a string of arguments
@@ -1202,15 +1385,20 @@ Comments and suggestions welcome!
         # Initialize the upgrade success flag
         $upgradeSuccess = $false
                 
+        <#
         if ($SuppressReboot) {
             Write-Log "The 'SuppressReboot' parameter was used. The system will not reboot automatically after the upgrade."
         }
         else {
             Write-Log "The 'SuppressReboot' parameter was NOT used. The system will reboot automatically after a successful upgrade."
         }
-
+        #>
+        # For now I've disabled the SuppressReboot parameter and relevant logic until we iron out the post-reboot script and scheduled task
+        # Instead we're using the /noreboot argument to prevent the automatic reboot after the upgrade, and manual reboots will be required after the upgrade.
+        Write-Log "The system will NOT automatically reboot after the upgrade."
+        
         # Output the command with arguments for debugging purposes
-        Write-Log "The upgrade command: `"$($setupPath)`" $($argsString)"
+        Write-Log "The upgrade command: '$($setupPath)' $($argsString)"
 
         Write-Log "Starting the installation. Please wait..."
         # Start the setup.exe process with the constructed arguments and retrieve the process object
@@ -1229,7 +1417,7 @@ Comments and suggestions welcome!
 
             # Check if the process has been running for more than 3 hours
             if ((Get-Date) - $startTime -gt (New-TimeSpan -Hours 3)) {
-            Write-Log -Severity Warning "Setup process has been running for more than 3 hours. Exiting the monitoring loop."
+            Write-Log -Severity Warning "Setup process has been running for more than 3 hours. Exiting the loop."
             break
             }
         }
@@ -1252,38 +1440,50 @@ Comments and suggestions welcome!
             # return
         }
 
-
-        Write-Log "The setupact log file can be found at `"$Win11Directory\Windows11SetupLogs\Panther\setupact.log.`"."
-        # Check the last line of the setupact.log file
-        $setupActTail = Get-Content "$Win11Directory\Windows11SetupLogs\Panther\setupact.log" -Tail 1 -ErrorAction SilentlyContinue
-        if ($setupActTail) { 
-            Write-Log -Message "Last line of the setupact log file: $($setupActTail)"   
+        if (Test-Path -Path "$Win11Directory\Windows11SetupLogs\Panther\setupact.log") {
+            Write-Log "The setupact log file can be found at `"$Win11Directory\Windows11SetupLogs\Panther\setupact.log.`"."
+            # Check the last line of the setupact.log file
+            $setupActTail = Get-Content "$Win11Directory\Windows11SetupLogs\Panther\setupact.log" -Tail 1 -ErrorAction SilentlyContinue
+            if ($setupActTail) { 
+                Write-Log -Message "Last line of the setupact log file: $($setupActTail)"   
             
-            if ($setupActTail -like "*Rebooting system*prevented by command line override*") {
-                Write-Log -Message "Upgrade SUCCESSFUL. Rebooting system prevented by command line override."
-            }
+                if ($setupActTail -like "*Rebooting system*prevented by command line override*") {
+                    Write-Log -Message "Upgrade SUCCESSFUL. Rebooting system prevented by command line override."
+                
+                    # Update the windowsMajorVersionUpgradeState custom field to indicate that a reboot is pending, even if ApplyAutomationControls is not set to true.
+                    Write-Log "Updating the windowsMajorVersionUpgradeState custom field to 'Pending Reboot'."
+                    ninja-property-set windowsMajorVersionUpgradeState "Pending Reboot / $(Get-Date -Format 'MM-dd-yyyy HH:mm:ss')"    
+                }
+                else {
+                    # Switch for result codes associated with Windows Setup compatibility warnings, as well as other errors:
+                    $resultCodesURL = "https://learn.microsoft.com/en-us/troubleshoot/windows-client/setup-upgrade-and-drivers/windows-10-upgrade-error-codes#result-codes"
+                    $error80070002URL = "https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/troubleshoot-windows-update-error-0x80070002"
+                    $error0x80070490URL = "https://learn.microsoft.com/en-us/troubleshoot/windows-server/installing-updates-features-roles/troubleshoot-windows-update-error-0x80070490"
+                    # $errorSystemReservedPartitionURL = "https://support.microsoft.com/en-us/topic/-we-couldn-t-update-system-reserved-partition-error-installing-windows-10-46865f3f-37bb-4c51-c69f-07271b6672ac"
+                    switch -Wildcard ($setupActTail) {
+                        "*0xC1900210*" { Write-Log -Severity Warning -Message "MOSETUP_E_COMPAT_SCANONLY	Setup didn't find any compat issue.`nSee $($resultCodesURL)." }
+                        "*0xC1900208*" { Write-Log -Severity Warning -Message "MOSETUP_E_COMPAT_INSTALLREQ_BLOCK	Setup found an actionable compat issue, such as an incompatible app.`nSee $($resultCodesURL)." }
+                        "*0xC1900204*" { Write-Log -Severity Warning -Message "MOSETUP_E_COMPAT_MIGCHOICE_BLOCK	The migration choice selected isn't available (ex: Enterprise to Home).`nSee $($resultCodesURL)." }
+                        "*0xC1900200*" { Write-Log -Severity Warning -Message "MOSETUP_E_COMPAT_SYSREQ_BLOCK	The computer isn't eligible for Windows 10.`nSee $($resultCodesURL)." }
+                        "*0xC190020E*" { Write-Log -Severity Warning -Message "MOSETUP_E_INSTALLDISKSPACE_BLOCK	The computer doesn't have enough free space to install.`nSee $($resultCodesURL)." }
+                        "*0x80070002*" { Write-Log -Severity Warning -Message "0x80070002 -2147024894 ERROR_FILE_NOT_FOUND The System cannot find the file specified.`nSee $($error80070002URL)." }
+                        "*0x80070490*" { Write-Log -Severity Info -Message "See $($error0x80070490URL)." }
+                    } # switch
+                    Write-Log -Severity Warning -Message "Upgrade FAILED."
+                }
+            } # if $SetupActTail is not empty
             else {
-                # Switch for result codes associated with Windows Setup compatibility warnings:
-                $resultCodesURL = "https://learn.microsoft.com/en-us/troubleshoot/windows-client/setup-upgrade-and-drivers/windows-10-upgrade-error-codes#result-codes"
-                switch -Wildcard ($setupActTail) {
-                    "*0xC1900210*" { Write-Log -Severity Warning -Message "MOSETUP_E_COMPAT_SCANONLY	Setup didn't find any compat issue.`nSee $($resultCodesURL)." }
-                    "*0xC1900208*" { Write-Log -Severity Warning -Message "MOSETUP_E_COMPAT_INSTALLREQ_BLOCK	Setup found an actionable compat issue, such as an incompatible app.`nSee $($resultCodesURL)." }
-                    "*0xC1900204*" { Write-Log -Severity Warning -Message "MOSETUP_E_COMPAT_MIGCHOICE_BLOCK	The migration choice selected isn't available (ex: Enterprise to Home).`nSee $($resultCodesURL)." }
-                    "*0xC1900200*" { Write-Log -Severity Warning -Message "MOSETUP_E_COMPAT_SYSREQ_BLOCK	The computer isn't eligible for Windows 10.`nSee $($resultCodesURL)." }
-                    "*0xC190020E*" { Write-Log -Severity Warning -Message "MOSETUP_E_INSTALLDISKSPACE_BLOCK	The computer doesn't have enough free space to install.`nSee $($resultCodesURL)." }
-                } # switch
-                Write-Log -Severity Warning -Message "Upgrade FAILED."
-            }
-        } # if $SetupActTail is not empty
+                Write-Log -Severity Warning "Failed to read the setupact.log log file."
+                # return
+            } # else $SetupActTail is empty
+        } # if setupact.log file exists
         else {
-            Write-Log -Severity Warning "Failed to read the setupact.log log file."
-            # return
-        } # else $SetupActTail is empty
+            Write-Log -Severity Warning "The setupact.log file does not exist at `"$Win11Directory\Windows11SetupLogs\Panther\setupact.log.`"."
+        } # if setupact.log file does not exist
 
 
         # Cleanup the upgrade files and folders
         if ($upgradeSuccess -eq $true) {
-
             # Deleting the extracted installer folder
             if (Test-Path -Path $ISOFolderPath) {
                 try {
@@ -1298,6 +1498,7 @@ Comments and suggestions welcome!
                 Write-Log -Severity Warning "No extracted installer folder found at $($ISOFolderPath) to delete."
             }
 
+            <#
             # Check if the reboot was suppressed
             if ($SuppressReboot) {
                 Write-Log "Initializing the post-reboot procedure."
@@ -1318,9 +1519,10 @@ Comments and suggestions welcome!
                 # <p:2:3:> Type p: Planned / Major Reason Code 2: Operating System. / Minor Reason Code 3: Upgrade.
                 shutdown.exe /r /t 0 /f /d p:2:3 /c "ITC Windows 11 upgrade completed. Restarting to apply changes."
             } # if reboot is not suppressed
+            #>
         } # if upgrade was successful
         else {
-            Write-Log -Severity Warning "The upgrade was not successful. Please check the logs for more details."
+            Write-Log -Severity Warning "The upgrade was not successful. Please check the logs for more details. The setup folder at $($ISOFolderPath) has been left in place for the next attempt."
         } # if upgrade was not successful
 
         # Unmount the ISO after the upgrade
@@ -1337,8 +1539,8 @@ Comments and suggestions welcome!
 # Parse the parameters from the environment variables or default values
 $InPlaceUpgrade = $Env:InPlaceUpgrade -eq "true"
 $AllowAfter_4AM = $Env:AllowAfter_4AM -eq "true"
-$SuppressReboot = $Env:SuppressReboot -eq "true"
 $UnsupportedHardware = $Env:UnsupportedHardware -eq "true"
+$EnablementPackage = $Env:EnablementPackage -eq "true"
 $SuppressReboot = $Env:SuppressReboot -eq "true"
 $TargetBuildNumber = if ($Env:TargetBuildNumber) { [int]$Env:TargetBuildNumber } else { 26100 }
 # $LogFilePath = if ([string]::IsNullOrWhiteSpace($Env:LogFilePath)) { "C:\Win11\Win11Upgrade.log" } else { $Env:LogFilePath }
@@ -1351,9 +1553,9 @@ $Params = @{
 
 if ($InPlaceUpgrade) { $Params["InPlaceUpgrade"] = $true }
 if ($AllowAfter_4AM) { $Params["AllowAfter_4AM"] = $true }
-if ($SuppressReboot) { $Params["SuppressReboot"] = $true }
 if ($UnsupportedHardware) { $Params["UnsupportedHardware"] = $true }
 if ($SuppressReboot) { $Params["SuppressReboot"] = $true }
+if ($EnablementPackage) { $Params["EnablementPackage"] = $true }
     
 # Call the Update-Win11 function with the constructed parameters
 Update-Win11 @Params
