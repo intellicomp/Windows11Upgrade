@@ -14,43 +14,43 @@ This repository contains a PowerShell script that automates Windows feature upgr
 - Writes logs to file and console (interactive) and supports progress monitoring helpers.
 
 ## Parameters
-- -InPlaceUpgrade
+- **-InPlaceUpgrade**
     Forces an in-place repair/upgrade path using matching-build media.
 
-- -RebootAfterUpgrade
+- **-RebootAfterUpgrade**
     Reboots the machine after a successful upgrade check. If omitted, the script leaves rebooting to the operator.
 
-- -UnsupportedHardware
+- **-UnsupportedHardware**
     Adds the setup switch for unsupported hardware scenarios (experimental).
 
-- -TargetBuildNumber
+- **-TargetBuildNumber**
     Target build number. Allowed values: 19045, 26100, 26200. Default: 26200.
 
-- -CustomISOUrl
+- **-CustomISOUrl**
     Uses a manually provided ISO URL and skips built-in compatibility/hash/size validation.
 
-- -ShowProgress
+- **-ShowProgress**
     Shows transfer progress in console output. Not recommended for NinjaOne activity logs.
 
-- -MonitorProgress
+- **-MonitorProgress**
     Writes upgrade-progress telemetry to C:\Win11\ProgressResults.log while setup is running.
 
-- -EnablementPackage
+- **-EnablementPackage**
     Attempts enablement package upgrade when eligible.
     Current supported path is 24H2 (26100) to 25H2 (26200), with minimum CU requirements.
     If requirements are not met, the script falls back to ISO method.
 
-- -DisableSleepDuringUpgrade
+- **-DisableSleepDuringUpgrade**
     Temporarily disables sleep during execution and restores original settings afterwards.
 
-- -DownloadAndExtractOnly
+- **-DownloadAndExtractOnly**
     Downloads and extracts setup files to C:\Win11\SetupFolder, then exits without running setup.
     Creates C:\Win11\DO_NOT_AUTO_DELETE.txt as a marker.
 
-- -SkipValidation
+- **-SkipValidation**
     For manually supplied ISO files already present on disk, skips hash/size checks.
 
-- -LogFilePath
+- **-LogFilePath**
     Log path. Default: C:\Win11\Win11Upgrade.log.
 
 ## Usage
