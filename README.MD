@@ -1,123 +1,113 @@
-# Windows 11 Upgrade Script
+## Windows 11 Upgrade Script
 
-This repository contains a PowerShell script that automates Windows feature upgrades using either ISO media or, when eligible, a Windows 11 enablement package.
+This PowerShell script automates Windows feature upgrades through ISO media or an eligible enablement package.
+It can run interactively or through NinjaOne.
 
-## Features
-- Supports target build upgrades for:
-    - Windows 10 22H2 (19045, ESU use case)
-    - Windows 11 24H2 (26100)
-    - Windows 11 25H2 (26200)
-- Supports in-place repair scenarios with matching build media.
-- Supports custom ISO URLs when you want to bypass built-in media selection and validation.
-- Optional enablement package path for eligible 24H2 to 25H2 upgrades.
-- Optional download/extract-only mode for DISM or manual setup use.
-- Writes logs to file and console (interactive) and supports progress monitoring helpers.
+Built-in target builds:
+
+- Windows 10 22H2 (19045, x64)
+- Windows 11 24H2 (26100)
+- Windows 11 25H2 (26200)
+- Windows 11 26H2 (26300, default)
+
+Available ISO editions, architectures, and languages vary by build. Windows 10 media is x64-only; ARM64 Home media
+is not included. The script validates built-in media using its expected hash and size.
+
+Other capabilities include same-build in-place repairs, custom ISO URLs, optional sleep prevention, download and
+extract-only preparation for DISM, BITS download retries with Invoke-WebRequest fallback, and upgrade logging.
+
+## Enablement Packages
+
+With `-EnablementPackage`, the script selects a package by target build, source build, and architecture. Supported
+paths and minimum revisions are:
+
+- 24H2 (26100.5074 or later) to 25H2 (26200)
+- 24H2 (26100.9168 or later) to 26H2 (26300)
+- 25H2 (26200.9168 or later) to 26H2 (26300)
+
+The package hash and size are checked, and Windows servicing events are used to verify installation, including
+reboot-required and already-installed outcomes. If no compatible package is available or prerequisites are not met,
+the script falls back to ISO media. Enablement packages cannot be combined with `-InPlaceUpgrade`; the
+`-RebootAfterUpgrade` parameter does not apply to enablement-package installs.
 
 ## Parameters
-- **-InPlaceUpgrade**
-    Forces an in-place repair/upgrade path using matching-build media.
 
-- **-RebootAfterUpgrade**
-    Reboots the machine after a successful upgrade check. If omitted, the script leaves rebooting to the operator.
+- `-InPlaceUpgrade`: Uses media matching the installed build for an in-place repair. Not compatible with
+  `-EnablementPackage`.
+- `-RebootAfterUpgrade`: Restarts after a successful ISO-based upgrade is confirmed. Otherwise, reboot manually.
+- `-UnsupportedHardware`: Adds Setup's experimental `/product server` switch.
+- `-TargetBuildNumber`: Selects 19045, 26100, 26200, or 26300. Defaults to 26300.
+- `-CustomISOUrl`: Downloads the specified ISO and bypasses built-in compatibility, hash, and size checks. It also
+  permits same-build repair media with a newer sub-build.
+- `-SkipValidation`: Uses an ISO already at `C:\Win11\Win11.iso` without hash or size checks and extracts it again.
+- `-ShowProgress`: Displays ISO download progress in the console; avoid using it with NinjaOne activity logging.
+- `-MonitorProgress`: Writes Setup progress to `C:\Win11\ProgressResults.log` while Setup runs.
+- `-EnablementPackage`: Uses an eligible enablement package; otherwise falls back to ISO media.
+- `-DisableSleepDuringUpgrade`: Saves current AC/DC sleep timeouts, disables sleep, then restores the settings.
+- `-DownloadAndExtractOnly`: Downloads and extracts media to `C:\Win11\SetupFolder` without starting Setup. Writes
+  `C:\Win11\DO_NOT_AUTO_DELETE.txt` to prevent controller cleanup.
+- `-LogFilePath`: Sets the main log path. Defaults to `C:\Win11\Win11Upgrade.log`.
 
-- **-UnsupportedHardware**
-    Adds the setup switch for unsupported hardware scenarios (experimental).
-
-- **-TargetBuildNumber**
-    Target build number. Allowed values: 19045, 26100, 26200. Default: 26200.
-
-- **-CustomISOUrl**
-    Uses a manually provided ISO URL and skips built-in compatibility/hash/size validation.
-
-- **-ShowProgress**
-    Shows transfer progress in console output. Not recommended for NinjaOne activity logs.
-
-- **-MonitorProgress**
-    Writes upgrade-progress telemetry to C:\Win11\ProgressResults.log while setup is running.
-
-- **-EnablementPackage**
-    Attempts enablement package upgrade when eligible.
-    Current supported path is 24H2 (26100) to 25H2 (26200), with minimum CU requirements.
-    If requirements are not met, the script falls back to ISO method.
-
-- **-DisableSleepDuringUpgrade**
-    Temporarily disables sleep during execution and restores original settings afterwards.
-
-- **-DownloadAndExtractOnly**
-    Downloads and extracts setup files to C:\Win11\SetupFolder, then exits without running setup.
-    Creates C:\Win11\DO_NOT_AUTO_DELETE.txt as a marker.
-
-- **-SkipValidation**
-    For manually supplied ISO files already present on disk, skips hash/size checks.
-
-- **-LogFilePath**
-    Log path. Default: C:\Win11\Win11Upgrade.log.
+Custom ISO URLs bypass validation. Confirm the ISO's architecture, edition, language, and suitability before using
+one. `-AllowAfter_4AM` and `-SuppressReboot` are inactive in the current script.
 
 ## Usage
 
 ### Run Manually
-1. Open PowerShell as Administrator.
-2. Load the latest script into memory:
+
+Run PowerShell as Administrator. Load the function by dot-sourcing the script, or download it into memory:
 
 ```powershell
-wget -Uri 'https://raw.githubusercontent.com/intellicomp/Windows11Upgrade/refs/heads/main/Windows%2011%20Upgrade.ps1' -UseBasicParsing | iex
+Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/intellicomp/Windows11Upgrade/refs/heads/main/Windows%2011%20Upgrade.ps1' `
+    -UseBasicParsing | Invoke-Expression
 ```
 
-3. Run the function with desired options. Examples:
+Examples:
 
 ```powershell
-Update-Win11 -TargetBuildNumber 26200 -RebootAfterUpgrade
+Update-Win11 -RebootAfterUpgrade
+Update-Win11 -TargetBuildNumber 26200 -EnablementPackage
+Update-Win11 -EnablementPackage
+Update-Win11 -DownloadAndExtractOnly -TargetBuildNumber 26300
+Update-Win11 -CustomISOUrl 'https://example.com/Windows11.iso'
 ```
 
-```powershell
-Update-Win11 -EnablementPackage -TargetBuildNumber 26200
-```
-
-```powershell
-Update-Win11 -DownloadAndExtractOnly -TargetBuildNumber 26200
-```
-
-### Use a Custom ISO URL
-
-```powershell
-Update-Win11 -CustomISOUrl "https://software.download.prss.microsoft.com/dbazure/Win11_25H2_English_x64.iso?t=..." -TargetBuildNumber 26200
-```
-
-When -CustomISOUrl is used, validation checks are intentionally skipped. Verify architecture, language, and edition compatibility before use.
+The default target is 26H2 (26300). Pass `-TargetBuildNumber 26200` to target 25H2.
 
 ### Run via NinjaOne
-1. Use the script with the environment-variable parsing section enabled (bottom of script).
-2. Configure NinjaOne script variables (true/false and values) to map to the same switches.
-3. Run automation.
+
+The script's bottom section maps NinjaOne environment variables to the function parameters and invokes the upgrade.
+Configure the variables there to select the target build and options. When `ApplyAutomationControls` is `true`, the
+script runs only when `windowsMajorVersionUpgradeState` is `Ready to run upgrade script`. The script also increments
+`windowsMajorVersionUpgradeAttemptCount`.
 
 ## Logging and Monitoring
-- Main log (default): C:\Win11\Win11Upgrade.log
-- Setup log source: C:\$WINDOWS.~BT\Sources\Panther\setupact.log
-- Copied setup logs: C:\Win11\Windows11SetupLogs\Panther\setupact.log
 
-Real-time main log:
+- Main log: `C:\Win11\Win11Upgrade.log` by default
+- Windows Setup source log: `C:\$WINDOWS.~BT\Sources\Panther\setupact.log`
+- Copied Setup log: `C:\Win11\Windows11SetupLogs\Panther\setupact.log`
+- Setup progress log with `-MonitorProgress`: `C:\Win11\ProgressResults.log`
+
+Follow the main or Setup log in real time:
 
 ```powershell
 Get-Content 'C:\Win11\Win11Upgrade.log' -Tail 1 -Wait
-```
-
-Real-time setup log:
-
-```powershell
 Get-Content 'C:\$WINDOWS.~BT\Sources\Panther\setupact.log' -Tail 1 -Wait
 ```
 
-Helper scripts generated in C:\Win11 during execution:
-- Show-BitsProgress.ps1
-- Show-UpgradeProgress.ps1
-- Invoke-SpeedTest.ps1
+The script generates three helper scripts in `C:\Win11`:
 
-These helper scripts are removed by the script after completion.
+- `Show-BitsProgress.ps1`: Shows BITS transfer progress.
+- `Show-UpgradeProgress.ps1`: Shows Setup progress and can optionally display the last Setup log line.
+- `Invoke-SpeedTest.ps1`: Runs Ookla Speedtest during the download stage.
 
-## Notes
-- Run with administrative privileges.
-- Ensure sufficient disk space for both media handling and upgrade staging.
-- The script runs setup with /noreboot and then either:
-    - reboots only when -RebootAfterUpgrade is specified, or
-    - leaves reboot as a manual action.
-- AllowAfter_4AM and SuppressReboot are currently not active parameters in this live script version.
+These helpers are removed during script cleanup. A separate stop-helper script is not generated by the current script.
+
+## Upgrade and Reboot Behavior
+
+ISO-based upgrades run Setup with `/noreboot`. After Setup completes, the script checks its logs, updates the NinjaOne
+upgrade-state custom field to a pending-reboot state, and suspends BitLocker for one reboot. It restarts only when
+`-RebootAfterUpgrade` is specified; otherwise, an operator must restart the device.
+
+Pending-reboot custom-field updates preserve an existing manual-intervention prefix, when present. The script also
+leaves setup files in place for controller cleanup after reboot and build verification.
