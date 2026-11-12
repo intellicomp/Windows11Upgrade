@@ -23,12 +23,13 @@ NOTE: This controls the reboot behavior initiated manually by the script post-up
 .PARAMETER RebootAfterUpgrade
 If specified, the script will reboot the system after a successful upgrade (once the upgrade is confirmed and setup.exe has exited).
 Note: The upgrade itself is always run with the /noreboot switch; this parameter initiates a manual (non-setup.exe-related) POST-upgrade reboot.
+This parameter does not apply to enablement-package installs.
 
 .PARAMETER UnsupportedHardware
 Allows upgrades to run on non-supported hardware by using the '/product server' switch when calling setup.exe. Note, this is an experimental feature and may not work as expected.
 
 .PARAMETER TargetBuildNumber
-Specifies the target build number for the upgrade. Defaults to '26200' (Windows 11 25H2).
+Specifies the target build number for the upgrade. Defaults to '26300' (Windows 11 26H2).
 
 .PARAMETER CustomISOUrl
 Specifies a custom ISO download URL instead of using the built-in ISO table.
@@ -49,7 +50,10 @@ This is not recommended for use with NinjaOne as it will clutter the Ninja Activ
 Enables monitoring of the ISO download and upgrade progress. Progress is logged to a log file that can be viewed realtime in the console using Get-Content, in conjunction with the tail and wait parameters.
 
 .PARAMETER EnablementPackage
-Specifies to use an enablement package for the upgrade. NOTE: This cannot be used to upgrade from versions prior to Windows 11 24H2.
+Specifies to use an enablement package for the upgrade. 
+For Windows 11 25H2, eligible 24H2 devices must be at build 26100.5074 or later. 
+For Windows 11 26H2, eligible 24H2 devices must be at build 26100.9168 or later and eligible 25H2 devices must be at build 26200.9168 or later. 
+Requests that do not meet the prerequisites fall back to the ISO method.
 
 .PARAMETER DisableSleepDuringUpgrade
 Prevents the system from entering sleep mode during the upgrade process.
@@ -75,6 +79,10 @@ Update-Win11 -TargetBuildNumber 26200
 .EXAMPLE
 Download and extract the ISO only (for DISM RestoreHealth operations for ex.).
 Update-Win11 -DownloadAndExtractOnly -TargetBuildNumber 26200
+
+.EXAMPLE
+Download and extract the Windows 11 26H2 ISO only.
+Update-Win11 -DownloadAndExtractOnly -TargetBuildNumber 26300
 
 .Example
 Run the script via NinjaOne.
@@ -105,20 +113,28 @@ Get-Content 'C:\$WINDOWS.~BT\Sources\Panther\setupact.log' -Tail 1 -Wait
 (Once the upgrade is complete, the setupact.log file will also be copied to the log file location specified in the script ("C:\Win11\Win11Upgrade.log" by default). 
 
 Monitoring the ISO download and upgrade progress (separate from the Win11Upgrade.log script logging- the script logs don't include progress updates on the download or upgrade process itself):
-Three helper scripts are written to C:\Win11 during execution:
+Four helper scripts are written to C:\Win11 during execution:
 - Show-BitsProgress.ps1: Monitors BITS download progress of the ISO file. Run manually to view real-time download status.
 - Show-UpgradeProgress.ps1: Monitors Windows setup upgrade progress. Run manually to view upgrade percentage in real-time.
 - Invoke-SpeedTest.ps1: Runs an Ookla speed test from the console during the download stage.
+- Stop-Win11Upgrade.ps1: Stops this automation during pre-flight or download, cancels its BITS jobs, and appends the technician's reason and outcome to the upgrade log.
+    Run from a separate elevated PowerShell session: C:\Win11\Stop-Win11Upgrade.ps1 -Reason "Install prerequisite CU first"
+    Confirmation is required. The helper refuses once extraction or installation begins. Files are left in place; changed sleep settings are not restored by a forced stop.
 All helper scripts are automatically removed after the upgrade completes.
 Note: The execution policy must be set to something other than 'Restricted' to run these scripts. You can change it by running: 'Set-ExecutionPolicy Bypass -Scope Process' before executing the progress scripts.
 
+Note: Pending reboot CF updates preserve an existing manual intervention prefix when present (Client declined manual intervention or Ticket for manual intervention needed).
+To avoid unnecessary rewrites, CF matching compares a stable prefix (state + target build + optional intervention prefix) and ignores the trailing timestamp.
+
 ====================================================================================================
 DATE CREATED: April 2025
-LAST UPDATED: 3/2/2026
+LAST UPDATED: 10/7/2026
 PURPOSE: Script the Windows upgrade process to a specified version of Windows 11.
 NOTES: This script is designed for use in both manual and automated environments (e.g., NinjaOne).
-Comments and suggestions welcome!
 -THH
+
+RECENT CHANGES:
+(10-07-2026) Added support for Windows 11 26H2 (build 26300). It's now the default target.
 ====================================================================================================
 #>
     [CmdletBinding()]
@@ -127,8 +143,8 @@ Comments and suggestions welcome!
         [Parameter(Mandatory = $false)]
         [switch]$InPlaceUpgrade,
 
+        # <<<This parameter is NOT currently in use in the script. The script will run regardless of the time of day.>>>
         # Parameter to allow the script to run after 4 AM
-        # <This parameter is NOT currently in use in the script. The script will run regardless of the time of day.>
         #[Parameter(Mandatory = $false)]
         #[switch]$AllowAfter_4AM,
 
@@ -148,18 +164,19 @@ Comments and suggestions welcome!
         [Parameter(Mandatory = $false)]
         [switch]$UnsupportedHardware,
 
-        # Parameter to specify the target build number for the upgrade, default is 26200 (Windows 11 25H2)
+        # Parameter to specify the target build number for the upgrade, default is 26300 (Windows 11 26H2)
         [Parameter(Mandatory = $false)]
         [ValidateSet(
-            # Windows 10 version 22H2 is included in the script for ESU, since to be eligible for the ESU program devices must be running Windows 10, version 22H2
+            # Windows 10 version 22H2 is included in the script for ESU, since to be eligible for the ESU program, devices must be running Windows 10, version 22H2
             # https://learn.microsoft.com/en-us/windows/whats-new/enable-extended-security-updates#:~:text=Device%20requirements%3A
             19045, # Windows 10 22H2 / Release date October 18, 2022
             # 22621, # Windows 11 22H2 / Release date September 20, 2022
             # 22631, # Windows 11 23H2 / Release date October 31, 2023
             26100, # Windows 11 24H2 / Release date October 1, 2024
-            26200 # Windows 11 25H2 / Release date September 30, 2025
+            26200, # Windows 11 25H2 / Release date September 30, 2025
+            26300 # Windows 11 26H2 / Release date September 29, 2026
         )]
-        [int]$TargetBuildNumber = 26200,
+        [int]$TargetBuildNumber = 26300,
 
         # Custom ISO URL to download instead of using built-in ISO table (skips all validation checks)
         [Parameter(Mandatory = $false)]
@@ -245,7 +262,8 @@ Comments and suggestions welcome!
                     $errorType = "heading"
                 }
                 else {
-                    $formattedMessage = "========== $Message =========="
+                    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    $formattedMessage = "[$Timestamp] [Phase] ========== $Message =========="
                     $errorType = "phase marker"
                 }
                 
@@ -291,8 +309,24 @@ Comments and suggestions welcome!
         } # function Write-Log
 
         function Remove-ProgressHelperScripts {
-            Remove-Item 'C:\Win11\Show-BitsProgress.ps1', 'C:\Win11\Show-UpgradeProgress.ps1', 'C:\Win11\Invoke-SpeedTest.ps1' -Force -ErrorAction SilentlyContinue
+            Remove-Item 'C:\Win11\Show-BitsProgress.ps1', 'C:\Win11\Show-UpgradeProgress.ps1', 'C:\Win11\Invoke-SpeedTest.ps1', 'C:\Win11\Stop-Win11Upgrade.ps1' -Force -ErrorAction SilentlyContinue
         } # end function Remove-ProgressHelperScripts
+
+        function Disable-UpgradeStopHelper {
+            $stageMutex = [System.Threading.Mutex]::new($false, "Global\Win11Upgrade-$upgradeRunId")
+            $lockTaken = $false
+            try {
+                try { $lockTaken = $stageMutex.WaitOne(10000) }
+                catch [System.Threading.AbandonedMutexException] { $lockTaken = $true }
+                if (-not $lockTaken) { throw "Timed out waiting for the stop helper. Installation will not be started." }
+                $upgradeRunState.CanStop = $false
+                $upgradeRunState | ConvertTo-Json | Set-Content -LiteralPath $upgradeRunStatePath -ErrorAction Stop
+            }
+            finally {
+                if ($lockTaken) { $stageMutex.ReleaseMutex() }
+                $stageMutex.Dispose()
+            }
+        }
 
         function Download-File {
             <#
@@ -476,7 +510,7 @@ Comments and suggestions welcome!
                     $downloadStartTime = Get-Date
                     try {
                         Write-Log "Attempting to download using BITS. Attempt $bitsAttempts of 3."
-                        $bitsJob = Start-BitsTransfer -Source $SourceUrl -Destination $Destination -Asynchronous -ErrorAction Stop
+                        $bitsJob = Start-BitsTransfer -Source $SourceUrl -Destination $Destination -DisplayName "Win11Upgrade-$upgradeRunId" -Asynchronous -ErrorAction Stop
         
                         Write-Log "BITS job started with ID: $($bitsJob.JobId)"
                         Write-Log "Initial BITS job state: $($bitsJob.JobState)"
@@ -1060,6 +1094,50 @@ Comments and suggestions welcome!
             }
         } # function Suspend-BitLockerUntilReboot
 
+        function Get-PreservedUpgradeStatePrefix {
+            [CmdletBinding()]
+            param(
+                [Parameter(Mandatory = $false)]
+                [AllowNull()]
+                [string]$CurrentCF
+            )
+
+            if ($CurrentCF -like "*Client declined manual intervention*") {
+                return "Client declined manual intervention / "
+            }
+            elseif ($CurrentCF -like "*Ticket for manual intervention needed*") {
+                return "Ticket for manual intervention needed / "
+            }
+
+            return ""
+        } # function Get-PreservedUpgradeStatePrefix
+
+        function New-PendingRebootUpgradeState {
+            [CmdletBinding()]
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$PendingRebootLabel,
+
+                [Parameter(Mandatory = $true)]
+                [int]$TargetBuildNumber,
+
+                [Parameter(Mandatory = $false)]
+                [AllowNull()]
+                [string]$CurrentCF,
+
+                [Parameter(Mandatory = $false)]
+                [datetime]$Timestamp = (Get-Date)
+            )
+
+            $interventionPrefix = Get-PreservedUpgradeStatePrefix -CurrentCF $CurrentCF
+            $statePrefix = "$interventionPrefix$PendingRebootLabel / TargetBuild $TargetBuildNumber / "
+
+            return [PSCustomObject]@{
+                StatePrefix = $statePrefix
+                StateValue  = "$statePrefix$($Timestamp.ToString('MM-dd-yyyy HH:mm:ss'))"
+            }
+        } # function New-PendingRebootUpgradeState
+
         function Check-SleepSettings {
             param(
                 [switch]$VerboseOutput
@@ -1173,7 +1251,7 @@ Comments and suggestions welcome!
 
         <#
         # Validate the TargetBuildNumber parameter
-        $validBuildNumbers = @(22631, 26100, 26200)
+        $validBuildNumbers = @(22631, 26100, 26200, 26300)
         if (-not ($validBuildNumbers -contains $TargetBuildNumber)) {
             Write-Log -Severity Warning "Invalid TargetBuildNumber specified: $TargetBuildNumber. Valid options are: $($validBuildNumbers -join ', ').
             Exiting the script. Please provide a valid build number and try again." 
@@ -1277,7 +1355,8 @@ Comments and suggestions welcome!
         #>
 
         # Check for existing setup.exe processes running for a long time (e.g., > 3 hours)
-        $existingSetups = Get-Process -Name setup* -ErrorAction SilentlyContinue
+        $existingSetups = Get-Process -Name setup* -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne 'Setup_Core' }
         $maxSetupAgeHours = 3
 
         if ($existingSetups) {
@@ -1440,8 +1519,31 @@ Invoke-SpeedTest -All:$All
         
         #region initializing variables
         Write-Log -IsPhaseMarker "---- [PHASE 1: Pre-Flight Checks] ----"
+        # Read installed Windows details from the CurrentVersion registry key. CurrentBuildNumber and UBR identify the
+        # actual OS build and revision; ProductName provides readable edition details and ISO matching, but its Windows
+        # family name can be stale, so the display label is normalized from the build. LCUVer (or WinREVersion) is used
+        # for enablement-package revision checks only, since its servicing base build can differ from the installed OS build.
         $WindowsVersionInfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
         $CurrentBuildNumber = [int]$WindowsVersionInfo.CurrentBuildNumber # [Environment]::OSVersion.Version.Build
+        $CurrentBuildAndRevision = $CurrentBuildNumber.ToString()
+        if ($WindowsVersionInfo.PSObject.Properties['UBR']) {
+            $CurrentBuildAndRevision = "$CurrentBuildNumber.$($WindowsVersionInfo.UBR)"
+        }
+        $WindowsFamily = if ($CurrentBuildNumber -ge 22000) { "Windows 11" } else { "Windows 10" }
+        $WindowsEditionLabel = [string]$WindowsVersionInfo.ProductName
+        if ([string]::IsNullOrWhiteSpace($WindowsEditionLabel)) {
+            $WindowsEditionLabel = [string]$WindowsVersionInfo.EditionID
+        }
+        if ([string]::IsNullOrWhiteSpace($WindowsEditionLabel)) {
+            $WindowsEditionLabel = "edition unknown"
+        }
+        if ($WindowsEditionLabel -match '^Windows\s+(10|11)\b') {
+            $WindowsEditionLabel = $WindowsEditionLabel -replace '^Windows\s+(10|11)\b', $WindowsFamily
+        }
+        else {
+            $WindowsEditionLabel = "$WindowsFamily $WindowsEditionLabel"
+        }
+        $CurrentOSLabel = "$WindowsEditionLabel (build $CurrentBuildAndRevision)"
         
         if ($WindowsVersionInfo.PSObject.Properties['LCUVer']) {
             # $WindowsLCU = [int]($WindowsVersionInfo.LCUVer.split(".")[3]) # the latest cumulative update version
@@ -1459,7 +1561,7 @@ Invoke-SpeedTest -All:$All
 
         # Check if the current build is already up to date - unless an in-place upgrade is being performed, downloading only, or using custom ISO
         if ( ($CurrentBuildNumber -ge $TargetBuildNumber) -and (-not $InPlaceUpgrade -and -not $DownloadAndExtractOnly -and -not $CustomISOUrl -and -not $SkipValidation) ) {
-            Write-Log "Windows is already up to date. Current build number: $($WindowsBuildAndCU), Target build number: $($TargetBuildNumber). Exiting the script."
+            Write-Log "Windows is already up to date. Current OS: $CurrentOSLabel, Target build number: $TargetBuildNumber. Exiting the script."
             Remove-ProgressHelperScripts
             return
         }
@@ -1516,13 +1618,57 @@ Invoke-SpeedTest -All:$All
             }
         } # if Windows 10 22H2
 
-        Write-Log "System info: Edition=$($WindowsEdition), CurrentBuild=$($WindowsBuildAndCU), TargetBuild=$($TargetBuildNumber), Arch=$archName, Language=$(if ($enGB) { 'en-GB' } else { 'en-US' })."
+        Write-Log "System info: CurrentOS=$CurrentOSLabel, TargetBuild=$TargetBuildNumber, Arch=$archName, Language=$(if ($enGB) { 'en-GB' } else { 'en-US' })."
         if ($enGB -and !$EnablementPackage) {
             Write-Log "The en-GB language is installed on this machine. Using the English International ISO."
         }
 
         # ISO Metadata Table
         $ISOs = @(
+            # Windows 11 26H2 (26300) - English (United States)
+            @{
+                Build      = 26300
+                Arch       = 'x64'
+                Tags       = @('Home', 'Pro', 'Edu', 'Ent')
+                Url        = 'https://ltshare.nyc3.digitaloceanspaces.com/Win11_26H2/Windows11_Client_x64_en-us_26300_9457_(26H2).iso'
+                ISOSize    = 9047330816
+                FolderSize = 9041688765
+                Hash       = 'BD4307DF32BC8AF33B39CCECB1174AEB345386630F89A2B86C7A4E36B55EA650'
+                Language   = 'en-US'
+            },
+            # Windows 11 26H2 (26300) - English (International)
+            @{
+                Build      = 26300
+                Arch       = 'x64'
+                Tags       = @('Home', 'Pro', 'Edu', 'Ent')
+                Url        = 'https://ltshare.nyc3.digitaloceanspaces.com/Win11_26H2/Windows11_Client_x64_en-gb_26300_9457_(26H2).iso'
+                ISOSize    = 9061271552
+                FolderSize = 9055326149
+                Hash       = '7E3F373BD3C2321B5D5125DFCF718DFBF1A0ABC50A267118669951890DF98A5D'
+                Language   = 'en-GB'
+            },
+            # Windows 11 26H2 (26300) - ARM64 English (United States)
+            @{
+                Build      = 26300
+                Arch       = 'ARM64'
+                Tags       = @('Pro', 'Edu', 'Ent')
+                Url        = 'https://ltshare.nyc3.digitaloceanspaces.com/Win11_26H2/Windows11_Client_arm64_en-us_26300_9457_(26h2).iso'
+                ISOSize    = 8528523264
+                FolderSize = 8522646325
+                Hash       = '8992F2D2CFD2FA647E579E9EB31FC21F34DA8333C29B6170FDE17D2ED6623E9C'
+                Language   = 'en-US'
+            },
+            # Windows 11 26H2 (26300) - ARM64 English (International)
+            @{
+                Build      = 26300
+                Arch       = 'ARM64'
+                Tags       = @('Pro', 'Edu', 'Ent')
+                Url        = 'https://ltshare.nyc3.digitaloceanspaces.com/Win11_26H2/Windows11_Client_arm64_en-gb_26300_9457_(26h2).iso'
+                ISOSize    = 8543594496
+                FolderSize = 8537413898
+                Hash       = '500BCB6F272B7C455156470EA06816F558F13B885723F84EE9EAB7534C7DEE61'
+                Language   = 'en-GB'
+            },
             # Windows 11 25H2 (26200) - English (United States)
             @{
                 Build      = 26200
@@ -1688,40 +1834,86 @@ Invoke-SpeedTest -All:$All
             }
         }
 
-        # Enablement Package Logic
+        # Enablement package metadata
+        # KB5054156 references:
+        # https://support.microsoft.com/en-us/topic/kb5054156-feature-update-to-windows-11-version-25h2-by-using-an-enablement-package-4d307e2d-3028-4323-bb46-552cff491643
+        # https://pureinfotech.com/windows-11-25h2-enablement-package-iso-direct-download/
+        # KB5121794 reference:
+        # https://support.microsoft.com/en-us/servicing/os/windows-11/2026/09/kb5121794-feature-update-to-windows-11-version-26h2
+        $EnablementPackages = @(
+            @{
+                TargetBuild     = 26200
+                TargetVersion   = "25H2"
+                SourceBuilds    = @(26100)
+                MinimumRevision = 5074
+                Arch            = "x64"
+                KB              = "KB5054156"
+                Url             = "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/fa84cc49-18b2-4c26-b389-90c96e6ae0d2/public/windows11.0-kb5054156-x64_a0c1638cbcf4cf33dbe9a5bef69db374b4786974.msu"
+                Hash            = "92EDDA7EEAA19B60D15CCDF777556BF0662EE9FEA1DCC9AEC281FCF12068044C"
+                Size            = 170885
+            },
+            @{
+                TargetBuild     = 26200
+                TargetVersion   = "25H2"
+                SourceBuilds    = @(26100)
+                MinimumRevision = 5074
+                Arch            = "ARM64"
+                KB              = "KB5054156"
+                Url             = "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/78b265e5-83a8-4e0a-9060-efbe0bac5bde/public/windows11.0-kb5054156-arm64_3d5c91aaeb08a87e0717f263ad4a61186746e465.msu"
+                Hash            = "0C1FDC7BEB0137E66DD693880890F984EB5768B2292EF9D16F4D13CA665A1B5C"
+                Size            = 174763
+            },
+            @{
+                TargetBuild     = 26300
+                TargetVersion   = "26H2"
+                SourceBuilds    = @(26100, 26200)
+                MinimumRevision = 9168 # confirmed to work by testing
+                Arch            = "x64"
+                KB              = "KB5121794"
+                Url             = "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/94520a88-858f-4832-a57d-7211f6d84a4e/public/Windows11.0-KB5121794-x64_5e20a3cce48d6611b16bdec42b07167f5456586a.msu"
+                Hash            = "BF43EB13B7EBDE920C2201473BFD5C531B45E0F46ACD8E0843F27F9744FB4B43"
+                Size            = 177535
+            },
+            @{
+                TargetBuild     = 26300
+                TargetVersion   = "26H2"
+                SourceBuilds    = @(26100, 26200)
+                MinimumRevision = 9168 # confirmed to work by testing
+                Arch            = "ARM64"
+                KB              = "KB5121794"
+                Url             = "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/9d8dc3d0-9cbf-4eb1-9411-722e3e6a19b3/public/Windows11.0-KB5121794-arm64_77a76caf2d362bb293a4d18058388f2717365abe.msu"
+                Hash            = "367E77739B3B09DC8C48553F9853BF53042F052DDAADC07ED025B83BB1D53A9D"
+                Size            = 178969
+            }
+        )
+
+        # Enablement package selection
         $EnablementPackageAvailable = $false
         if ($EnablementPackage) {
             Write-Log "EnablementPackage specified. Preparing to run enablement package upgrade..."
-            # Check that the current build is 24H2 (26100) and that the target build specified when running the script is 25H2 (26200)
-            if ($TargetBuildNumber -eq 26200 -and $CurrentBuildNumber -eq 26100) {
-                # Windows 11 24H2 must be at build 26100.5074 or higher (KB5064081 or later)
-                # https://support.microsoft.com/en-us/topic/kb5054156-feature-update-to-windows-11-version-25h2-by-using-an-enablement-package-4d307e2d-3028-4323-bb46-552cff491643
-                $currentRevision = [int]$WindowsBuildAndCU.Split('.')[-1]
-                $requiredRevision = 5074
-                if ($currentRevision -lt $requiredRevision) {
-                    Write-Log -Severity Warning "Enablement package requires Windows 11 24H2 build 26100.5074 or higher. Current build: $WindowsBuildAndCU. Falling back to ISO method."
-                    $EnablementPackageAvailable = $false
-                }
-                else {
-                    $EnablementPackageAvailable = $true
-                    # https://pureinfotech.com/windows-11-25h2-enablement-package-iso-direct-download/
-                    if ($archName -eq "x64") {
-                        $EnablementPackageUrl = "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/fa84cc49-18b2-4c26-b389-90c96e6ae0d2/public/windows11.0-kb5054156-x64_a0c1638cbcf4cf33dbe9a5bef69db374b4786974.msu"
-                        $EnablementPackageHash = "92EDDA7EEAA19B60D15CCDF777556BF0662EE9FEA1DCC9AEC281FCF12068044C"
-                    }
-                    elseif ($archName -eq "ARM64") {
-                        $EnablementPackageUrl = "https://catalog.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/78b265e5-83a8-4e0a-9060-efbe0bac5bde/public/windows11.0-kb5054156-arm64_3d5c91aaeb08a87e0717f263ad4a61186746e465.msu"
-                        $EnablementPackageHash = "0C1FDC7BEB0137E66DD693880890F984EB5768B2292EF9D16F4D13CA665A1B5C"
-                    }
-                    else {
-                        Write-Log -Severity Warning "Enablement package is not available for architecture: $archName. Falling back to ISO method."
-                        $EnablementPackageAvailable = $false
-                    }  
-                }
+            $currentRevision = [int]$WindowsBuildAndCU.Split('.')[-1]
+            $selectedPackage = $EnablementPackages | Where-Object {
+                $_.TargetBuild -eq $TargetBuildNumber -and
+                $_.SourceBuilds -contains $CurrentBuildNumber -and
+                $_.Arch -eq $archName
+            } | Select-Object -First 1
+
+            if (-not $selectedPackage) {
+                Write-Log -Severity Warning "Enablement package is not available for source build $CurrentBuildNumber, target build $TargetBuildNumber, and architecture $archName. Falling back to ISO method."
             }
             else {
-                Write-Log -Severity Warning "Enablement package can only be used when upgrading from 24H2 (26100) to 25H2 (26200). Current build: $CurrentBuildNumber, Target build: $TargetBuildNumber. Falling back to ISO method."
-                $EnablementPackageAvailable = $false
+                $minimumBuildAndCU = "$CurrentBuildNumber.$($selectedPackage.MinimumRevision)"
+                if ($currentRevision -lt $selectedPackage.MinimumRevision) {
+                    Write-Log -Severity Warning "Enablement package requires build $minimumBuildAndCU or later. Current build: $CurrentBuildAndRevision. Falling back to ISO method."
+                }
+                else {
+                    $EnablementPackageKB = $selectedPackage.KB
+                    $EnablementPackageUrl = $selectedPackage.Url
+                    $EnablementPackageHash = $selectedPackage.Hash
+                    $EnablementPackageSize = $selectedPackage.Size
+                    $EnablementPackageFileName = "Win11_$($selectedPackage.TargetVersion)_Enablement_$archName.msu"
+                    $EnablementPackageAvailable = $true
+                }
             }
         } # if $EnablementPackage
 
@@ -1777,22 +1969,25 @@ Invoke-SpeedTest -All:$All
         } # if not using enablement package
         else {
             # Enablement package will be used
-            $EnablementPackageFile = "$Win11Directory\Win11_25H2_Enablement_$archName.msu"
+            $EnablementPackageFile = Join-Path $Win11Directory $EnablementPackageFileName
         } # else using enablement package
 
         # Enablement Package Installation Logic
         if ($EnablementPackage -and $EnablementPackageAvailable) {
+            Write-Log -IsPhaseMarker "---- [PHASE 2: Enablement Package Installation] ----"
+
             # Check if the MSU file exists and matches the expected hash before downloading
             $msuPresentAndValid = $false
             if (Test-Path $EnablementPackageFile) {
-                Write-Log "Enablement package file is present. Verifying hash..."
+                Write-Log "Enablement package file is present. Verifying hash and file size..."
                 $actualHash = (Get-FileHash -Path $EnablementPackageFile -Algorithm SHA256).Hash
-                if ($actualHash -eq $EnablementPackageHash) {
-                    Write-Log "Enablement package file matches the expected hash. Skipping download."
+                $actualSize = (Get-Item -Path $EnablementPackageFile).Length
+                if ($actualHash -eq $EnablementPackageHash -and $actualSize -eq $EnablementPackageSize) {
+                    Write-Log "Enablement package file matches the expected hash and size. Skipping download."
                     $msuPresentAndValid = $true
                 }
                 else {
-                    Write-Log -Severity Warning "Enablement package file hash does not match expected. Deleting and re-downloading."
+                    Write-Log -Severity Warning "Enablement package file hash or size does not match expected. Deleting and re-downloading."
                     Remove-Item -Path $EnablementPackageFile -Force
                 }
             }
@@ -1806,6 +2001,12 @@ Invoke-SpeedTest -All:$All
                     Remove-ProgressHelperScripts
                     exit 1
                 }
+            }
+
+            if ((Get-Item -Path $EnablementPackageFile).Length -ne $EnablementPackageSize) {
+                Write-Log -Severity Error "Enablement package file size does not match expected size of $EnablementPackageSize bytes. Exiting."
+                Remove-ProgressHelperScripts
+                exit 1
             }
 
             $wusaArgs = "`"$EnablementPackageFile`" /quiet /norestart"
@@ -1823,42 +2024,53 @@ Invoke-SpeedTest -All:$All
             else {
                 Write-Log -Severity Warning "wusa execution complete. Failed to retrieve wusa process information after installation. Checking Event Viewer for confirmation of success."
             }
+
+            Write-Log -IsPhaseMarker "---- [PHASE 3: Enablement Package Verification] ----"
             
             # Wait a few seconds to allow the event to be written to the log
             Write-Log "Waiting 5 seconds for Event Viewer to update..."
             Start-Sleep -Seconds 5
 
-            # Get the most recent relevant WUSA event (ID 2 or 3) from the Setup log
+            # Get the most recent relevant WUSA event (ID 2, 3, or 4) from the Setup log
             $wusaEvents = Get-WinEvent -LogName Setup -MaxEvents 30 | Where-Object {
-                $_.ProviderName -eq "Microsoft-Windows-WUSA" -and ($_.Id -eq 2 -or $_.Id -eq 3)
+                $_.ProviderName -eq "Microsoft-Windows-WUSA" -and ($_.Id -eq 2 -or $_.Id -eq 3 -or $_.Id -eq 4)
             }
 
-            # Find the most recent event for this enablement package attempt
-            $evt = $null
-            foreach ($ev in $wusaEvents) {
-                if ($ev.Id -eq 2 -and $ev.Message -match "KB5054156") {
-                    $evt = $ev
-                    break
-                }
-                elseif ($ev.Id -eq 3 -and $ev.Message -match "2359302") {
-                    # ID 3 with error 2359302 means "already installed"
-                    $evt = $ev
-                    break
-                }
+            # Prefer reboot-required confirmation, then successful install, then already-installed.
+            $kbPattern = [regex]::Escape($EnablementPackageKB)
+            $evt = $wusaEvents | Where-Object {
+                $_.Id -eq 4 -and $_.Message -match $kbPattern
+            } | Select-Object -First 1
+
+            if (-not $evt) {
+                $evt = $wusaEvents | Where-Object {
+                    $_.Id -eq 2 -and $_.Message -match $kbPattern
+                } | Select-Object -First 1
+            }
+
+            if (-not $evt) {
+                $evt = $wusaEvents | Where-Object {
+                    $_.Id -eq 3 -and $_.Message -match "2359302"
+                } | Select-Object -First 1
             }
 
             if ($evt) {
                 if ($evt.Id -eq 2) {
-                    Write-Log "Enablement package KB5054156 installed successfully, as confirmed in Event Viewer (Event ID 2)."
+                    Write-Log "Enablement package $EnablementPackageKB installed successfully, as confirmed in Event Viewer (Event ID 2)."
+                }
+                elseif ($evt.Id -eq 4) {
+                    Write-Log "Enablement package $EnablementPackageKB installation was confirmed by Event Viewer (Event ID 4). A reboot is required before the package reaches the Installed state."
                 }
                 elseif ($evt.Id -eq 3) {
-                    Write-Log "Enablement package KB5054156 is already installed (Event ID 3, error 2359302). Pending reboot to complete activation."
+                    Write-Log "Enablement package $EnablementPackageKB is already installed (Event ID 3, error 2359302). Pending reboot to complete activation."
                 }
-                $pendingRebootValue = "Pending Reboot Enablement Package / TargetBuild $TargetBuildNumber / $(Get-Date -Format 'MM-dd-yyyy HH:mm:ss')"
+                
                 $currentCF = Ninja-Property-Get windowsMajorVersionUpgradeState
-                if ($null -eq $currentCF -or $currentCF -notmatch "^Pending Reboot Enablement Package") {
-                    Write-Log "Updating the windowsMajorVersionUpgradeState custom field to '$pendingRebootValue'."
-                    Ninja-Property-Set windowsMajorVersionUpgradeState $pendingRebootValue
+                $pendingState = New-PendingRebootUpgradeState -PendingRebootLabel "Pending Reboot Enablement Package" -TargetBuildNumber $TargetBuildNumber -CurrentCF $currentCF
+
+                if ($null -eq $currentCF -or $currentCF -notlike "$($pendingState.StatePrefix)*") {
+                    Write-Log "Updating the windowsMajorVersionUpgradeState custom field to '$($pendingState.StateValue)'."
+                    Ninja-Property-Set windowsMajorVersionUpgradeState $pendingState.StateValue
                     Suspend-BitLockerUntilReboot
                 }
 
@@ -2229,6 +2441,9 @@ Invoke-SpeedTest -All:$All
                 }    
             } # if folder does not exist
         } # if ISO extracted folder is not present or not valid
+        else {
+            Write-Log "Skipping extraction: setup folder already present and validated during Phase 2 checks."
+        }
         #endregion ISO Extraction
 
         # If DownloadAndExtractOnly parameter was specified, create marker file and exit
@@ -2564,19 +2779,14 @@ When finished delete this file to allow auto-cleanup.
                 
                     # Update the windowsMajorVersionUpgradeState custom field to indicate that a reboot is pending, even if ApplyAutomationControls is not set to true.
                     if ($InPlaceUpgrade) {
-                        Write-Log "Updating the windowsMajorVersionUpgradeState custom field to 'Repair completed - Pending Reboot / TargetBuild $TargetBuildNumber / $(Get-Date -Format 'MM-dd-yyyy HH:mm:ss')'."
-                        Ninja-Property-Set windowsMajorVersionUpgradeState "Repair completed - Pending Reboot / TargetBuild $TargetBuildNumber / $(Get-Date -Format 'MM-dd-yyyy HH:mm:ss')"        
+                        $currentCF = Ninja-Property-Get windowsMajorVersionUpgradeState
+                        $newCF = (New-PendingRebootUpgradeState -PendingRebootLabel "Repair completed - Pending Reboot" -TargetBuildNumber $TargetBuildNumber -CurrentCF $currentCF).StateValue
+                        Write-Log "Updating the windowsMajorVersionUpgradeState custom field to '$newCF'."
+                        Ninja-Property-Set windowsMajorVersionUpgradeState $newCF        
                     }
                     else {
-                        # Preserve "Ticket for manual intervention needed" if present.
-                        $pendingRebootDateStr = Get-Date -Format 'MM-dd-yyyy HH:mm:ss'
                         $currentCF = Ninja-Property-Get windowsMajorVersionUpgradeState
-                        if ($currentCF -like "*Ticket for manual intervention needed*") {
-                            $newCF = "Ticket for manual intervention needed / Pending Reboot / TargetBuild $TargetBuildNumber / $pendingRebootDateStr"
-                        }
-                        else {
-                            $newCF = "Pending Reboot / TargetBuild $TargetBuildNumber / $pendingRebootDateStr"
-                        }
+                        $newCF = (New-PendingRebootUpgradeState -PendingRebootLabel "Pending Reboot" -TargetBuildNumber $TargetBuildNumber -CurrentCF $currentCF).StateValue
                         Write-Log "Updating the windowsMajorVersionUpgradeState custom field to '$newCF'."
                         Ninja-Property-Set windowsMajorVersionUpgradeState $newCF
                     }
@@ -2712,7 +2922,7 @@ $CustomISOUrl = if ($Env:CustomISOUrl) { $Env:CustomISOUrl } else { $null }
 $SkipValidation = $Env:SkipValidation -eq "true"
 $MonitorProgress = $Env:MonitorProgress -eq "true"
 $DisableSleepDuringUpgrade = $Env:DisableSleepDuringUpgrade -eq "true"
-$TargetBuildNumber = if ($Env:TargetBuildNumber) { [int]$Env:TargetBuildNumber } else { 26200 }
+$TargetBuildNumber = if ($Env:TargetBuildNumber) { [int]$Env:TargetBuildNumber } else { 26300 }
 # $LogFilePath = if ([string]::IsNullOrWhiteSpace($Env:LogFilePath)) { "C:\Win11\Win11Upgrade.log" } else { $Env:LogFilePath }
 
 # Construct the parameter set dynamically
